@@ -1,6 +1,9 @@
 ﻿using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
+using Cinemachine;
+using UnityEngine.UI;
+using UnityEngine.VFX;
 #if ENABLE_INPUT_SYSTEM 
 using UnityEngine.InputSystem;
 #endif
@@ -48,6 +51,9 @@ namespace StarterAssets
         [Tooltip("Time required to pass before entering the fall state. Useful for walking down stairs")]
         public float FallTimeout = 0.15f;
 
+        [Space(10)]
+        [SerializeField] private CinemachineVirtualCamera _cameraFollow;
+
         [Header("KnockBack")]
         public float mass = 2;
         private Vector3 _impact = Vector3.zero;
@@ -55,7 +61,7 @@ namespace StarterAssets
 
         [Header("Player Grounded")]
         [Tooltip("If the character is grounded or not. Not part of the CharacterController built in grounded check")]
-        public bool Grounded = true;
+        public bool Grounded = false;
 
         [Tooltip("Useful for rough ground")]
         public float GroundedOffset = -0.14f;
@@ -65,6 +71,29 @@ namespace StarterAssets
 
         [Tooltip("What layers the character uses as ground")]
         public LayerMask GroundLayers;
+        
+        [Header("Respawn")]
+        public float RespawnTimeOut = 1f;
+        public GameObject RespawnScreen;
+        private Vector3 _respawnPoint;
+        private float _respawnTimeoutDelta;
+
+        [Header("Stamina")]
+        public float currentStamina = 10.0f;
+        public float maxStamina = 10.0f;
+        private bool isStuned;
+        private bool justStuned = false;
+        public float staminaDrain = 0.5f;
+        public float staminaRegent = 0.5f;
+        public float StunedTime = 2f;
+        private float _limited = 0f;
+        private float _stunedTimeoutDelta;
+        public Image staminaProsressUI = null;
+        public CanvasGroup sliderCanvasGroup = null;
+
+        [Header("SprintEffect")]
+        public GameObject SprintEffect;
+        private ParticleSystem _sprintEffect;
 
         [Header("Cinemachine")]
         [Tooltip("The follow target set in the Cinemachine Virtual Camera that the camera will follow")]
@@ -81,6 +110,7 @@ namespace StarterAssets
 
         [Tooltip("For locking the camera position on all axis")]
         public bool LockCameraPosition = false;
+        
 
 
         // cinemachine
@@ -92,8 +122,9 @@ namespace StarterAssets
         private float _animationBlend;
         private float _targetRotation = 0.0f;
         private float _rotationVelocity;
-        private float _verticalVelocity;
+        [HideInInspector] public float _verticalVelocity;
         private float _terminalVelocity = 53.0f;
+        [HideInInspector] public bool _startedFall;
 
         // timeout deltatime
         private float _jumpTimeoutDelta;
@@ -105,13 +136,15 @@ namespace StarterAssets
         private int _animIDJump;
         private int _animIDFreeFall;
         private int _animIDMotionSpeed;
+        private int _animIDStuned;
+        private int _animIDRoll;
 
 #if ENABLE_INPUT_SYSTEM 
         private PlayerInput _playerInput;
 #endif
         private Animator _animator;
         private CharacterController _controller;
-        private StarterAssetsInputs _input;
+        [HideInInspector] public StarterAssetsInputs _input;
         private GameObject _mainCamera;
 
         private const float _threshold = 0.01f;
@@ -119,7 +152,11 @@ namespace StarterAssets
         private bool _hasAnimator;
         private bool hasDoubleJump = false;
         private Vector3 inputDirection;
-
+        private float _vel;
+        private float c = 0.01f;
+        private Vector3 knockDirection;
+        
+        
 
 
         private bool IsCurrentDeviceMouse
@@ -146,6 +183,10 @@ namespace StarterAssets
 
         private void Start()
         {
+            _sprintEffect = SprintEffect.GetComponent<ParticleSystem>();
+            _sprintEffect.Stop(true, ParticleSystemStopBehavior.StopEmittingAndClear);
+            _stunedTimeoutDelta = StunedTime;
+            RespawnScreen.SetActive(false);
             _cinemachineTargetYaw = CinemachineCameraTarget.transform.rotation.eulerAngles.y;
             
             _hasAnimator = TryGetComponent(out _animator);
@@ -171,11 +212,18 @@ namespace StarterAssets
             JumpAndGravity();
             GroundedCheck();
             Move();
+            StaminaSprint();
+        }
+        private void FixedUpdate()
+        {
+            Respawn();
+            SpeedUpEffect();
         }
 
         private void LateUpdate()
         {
             CameraRotation();
+            CameraZoom();
         }
 
         private void AssignAnimationIDs()
@@ -185,6 +233,8 @@ namespace StarterAssets
             _animIDJump = Animator.StringToHash("Jump");
             _animIDFreeFall = Animator.StringToHash("FreeFall");
             _animIDMotionSpeed = Animator.StringToHash("MotionSpeed");
+            _animIDStuned = Animator.StringToHash("Stuned");
+            _animIDRoll = Animator.StringToHash("Roll");
         }
 
         private void GroundedCheck()
@@ -194,15 +244,113 @@ namespace StarterAssets
                 transform.position.z);
             Grounded = Physics.CheckSphere(spherePosition, GroundedRadius, GroundLayers,
                 QueryTriggerInteraction.Ignore);
-            // update animator if using character
-            if (Grounded)
-            {
-                hasKnockBack = false;
-            }
+            // update animator if using characte
             if (_hasAnimator)
             {
                 _animator.SetBool(_animIDGrounded, Grounded);
             }
+        }
+
+        public void Obtacle(int regent, Vector3 direction, float obtacleForce)
+        {
+            currentStamina -= regent;
+            Knockback(direction, obtacleForce);
+        }
+
+        public void StaminaSprint()
+        {
+            if(currentStamina <= 0f)
+            {
+                currentStamina = 0f;
+            }
+
+            if(currentStamina <= maxStamina - 0.01f && !_input.sprint && !isStuned && Grounded)
+            {
+                currentStamina += staminaRegent * Time.deltaTime;
+                UpdateStamina(1);
+            }
+
+            if(currentStamina <= _limited)
+            {
+                isStuned = true;
+            }
+
+            if(_stunedTimeoutDelta >= 0.0f && Grounded && isStuned)
+            {
+                _animator.SetBool(_animIDStuned, true);
+                _input.sprint = false;
+                _stunedTimeoutDelta -= Time.deltaTime;
+            }
+            else if(_stunedTimeoutDelta < 0.0f)
+            {
+                justStuned = true;
+                isStuned = false;
+                _stunedTimeoutDelta = StunedTime;
+            }
+
+            if(currentStamina <= maxStamina/6)
+            {
+                if(justStuned)
+                {
+                    _input.sprint = false;
+                }
+            }
+            else
+            {
+                justStuned = false;
+            }
+
+
+            if(_input.sprint && _input.move != Vector2.zero)
+            {
+                currentStamina -= staminaDrain * Time.deltaTime;
+                UpdateStamina(1);
+            }
+        }
+
+        public void UpdateStamina(int value)
+        {
+            staminaProsressUI.fillAmount = currentStamina / maxStamina;
+
+            if (value == 0)
+            {
+                sliderCanvasGroup.alpha = 0;
+            }
+            else
+            {
+                sliderCanvasGroup.alpha = 1;
+            }
+        }
+
+        private void SpeedUpEffect()
+        {
+            ParticleSystem.MainModule _main = _sprintEffect.main;
+            _main.startColor = new ParticleSystem.MinMaxGradient(new Color(0.5f,0.5f,0.5f,c), new Color(1,1,1,c));
+            if(_speed >= 6.5f)
+            {
+                SprintEffect.SetActive(true);
+                if(c < 0.8f)
+                {
+                    c += 0.4f * Time.deltaTime; 
+                }
+                if(c >= 0.5f)
+                {
+                    c = 0.5f;
+                }
+            }
+            if(_speed < 6.5f)
+            {
+                if(c > 0f)
+                {
+                    c -= 0.7f * Time.deltaTime; 
+                }
+                if(c <= 0f)
+                {
+                    SprintEffect.SetActive(false);
+                }
+
+            }
+
         }
 
         private void CameraRotation()
@@ -225,11 +373,24 @@ namespace StarterAssets
             CinemachineCameraTarget.transform.rotation = Quaternion.Euler(_cinemachineTargetPitch + CameraAngleOverride,
                 _cinemachineTargetYaw, 0.0f);
         }
+        private void CameraZoom()
+        {
+            if(_input.sprint && _input.move != Vector2.zero && _cameraFollow.m_Lens.FieldOfView < 45f)
+            {
+                _cameraFollow.m_Lens.FieldOfView += SpeedChangeRate * Time.deltaTime;                
+            }
+            if((!_input.sprint || _input.move == Vector2.zero) && _cameraFollow.m_Lens.FieldOfView > 40f)
+            {
+                _cameraFollow.m_Lens.FieldOfView -= SpeedChangeRate * Time.deltaTime;
+            }
+        }
 
         private void Move()
         {
+            _animator.SetBool(_animIDStuned, false);
             // set target speed based on move speed, sprint speed and if sprint is pressed
             float targetSpeed = _input.sprint ? SprintSpeed : MoveSpeed;
+            
 
             // a simplistic acceleration and deceleration designed to be easy to remove, replace, or iterate upon
 
@@ -244,21 +405,30 @@ namespace StarterAssets
             float inputMagnitude = _input.analogMovement ? _input.move.magnitude : 1f;
 
             // accelerate or decelerate to target speed
-            if (currentHorizontalSpeed < targetSpeed - speedOffset ||
-                currentHorizontalSpeed > targetSpeed + speedOffset)
+            if (isStuned || _startedFall)
             {
-                // creates curved result rather than a linear one giving a more organic speed change
-                // note T in Lerp is clamped, so we don't need to clamp our speed
-                _speed = Mathf.Lerp(currentHorizontalSpeed, targetSpeed * inputMagnitude,
-                    Time.deltaTime * SpeedChangeRate);
-
-                // round speed to 3 decimal places
-                _speed = Mathf.Round(_speed * 1000f) / 1000f;
+                _speed = 0f;
             }
             else
             {
-                _speed = targetSpeed;
+                if (currentHorizontalSpeed < targetSpeed - speedOffset ||
+                    currentHorizontalSpeed > targetSpeed + speedOffset)
+                {
+                    // creates curved result rather than a linear one giving a more organic speed change
+                    // note T in Lerp is clamped, so we don't need to clamp our speed
+                    _speed = Mathf.Lerp(currentHorizontalSpeed, targetSpeed * inputMagnitude,
+                        Time.deltaTime * SpeedChangeRate);
+
+                    // round speed to 3 decimal places
+                    _speed = Mathf.Round(_speed * 1000f) / 1000f;
+                }
+                
+                else
+                {
+                    _speed = targetSpeed;
+                }
             }
+            
 
             _animationBlend = Mathf.Lerp(_animationBlend, targetSpeed, Time.deltaTime * SpeedChangeRate);
             if (_animationBlend < 0.01f) _animationBlend = 0f;
@@ -281,20 +451,32 @@ namespace StarterAssets
 
 
             Vector3 targetDirection = Quaternion.Euler(0.0f, _targetRotation, 0.0f) * Vector3.forward;
-
-            // move the player
-            if(_impact.magnitude > 0.2F)
+            
+            if(!hasKnockBack)
             {
-                hasKnockBack = true;
-                _controller.Move(_impact * Time.deltaTime);
+                knockDirection = Quaternion.Euler(0.0f, _targetRotation, 0.0f) * Vector3.back;
+            }
+            // move the player
+            if(_impact.magnitude > 0.2F || hasKnockBack)
+            {
+                if(Grounded)
+                {
+                    hasKnockBack = false;
+                }
+                if(_impact.magnitude > 0.2F)
+                {
+                    hasKnockBack = true;
+                }
+                hasDoubleJump = false;
+                _controller.Move((knockDirection.normalized * 8f + _impact +
+                            new Vector3(0.0f, _verticalVelocity, 0.0f )) * Time.deltaTime);
                 _impact = Vector3.Lerp(_impact, Vector3.zero, 5 * Time.deltaTime);
-                _verticalVelocity = _impact.y;
-                Debug.Log(_verticalVelocity);
             }
             else
             {
+                hasKnockBack = false;
                 _controller.Move(targetDirection.normalized * (_speed * Time.deltaTime) +
-                             new Vector3(0.0f, _verticalVelocity, 0.0f) * Time.deltaTime);
+                             new Vector3(0.0f, _verticalVelocity * Time.deltaTime, 0.0f));
             }
             
 
@@ -321,16 +503,21 @@ namespace StarterAssets
                 }
      
                 // stop our velocity dropping infinitely when grounded
-                if (_verticalVelocity < 0.0f)
+                if(Grounded && !_startedFall)
                 {
-                    _verticalVelocity = -2f;
+                    if (_verticalVelocity < 0.0f)
+                    {
+                        _verticalVelocity = -2f;
+                    }
                 }
+                
      
                 // Jump
                 if (_input.jump && _jumpTimeoutDelta <= 0.0f && !hasDoubleJump)
                 {
                     // the square root of H * -2 * G = how much velocity needed to reach desired height
                     _verticalVelocity = Mathf.Sqrt(JumpHeight * -2f * Gravity);
+                    _vel = _verticalVelocity * Time.deltaTime;
                     hasDoubleJump = true;
                     // update animator if using character
                     if (_hasAnimator)
@@ -338,18 +525,25 @@ namespace StarterAssets
                         _animator.SetBool(_animIDJump, true);
                     }
                     _input.jump = false;
-                    Debug.Log("Nhảy lần 1: " + _verticalVelocity + "  " + hasDoubleJump);
                 }
      
                 else if (_input.jump && hasDoubleJump && !hasKnockBack)
                 {
-                    _verticalVelocity = _verticalVelocity + Mathf.Sqrt(JumpHeight * -2f * Gravity);
-                    hasDoubleJump = false;
-                    if (_hasAnimator)
+                    if(Grounded)
                     {
-                        _animator.SetBool(_animIDJump, true);
+                        hasDoubleJump = false;
+                        _vel = 0;
                     }
-                    Debug.Log("Nhảy lần 2: " + _verticalVelocity + "  " + hasDoubleJump);
+                    else
+                    {
+                        _verticalVelocity = _vel + Mathf.Sqrt(JumpHeight * -2f * Gravity);
+                        if (_hasAnimator)
+                        {
+                            _animator.SetBool(_animIDJump, true);
+                        }
+                        _input.jump = false;
+                        hasDoubleJump = false;
+                    }
                 }
      
                 // jump timeout
@@ -387,18 +581,44 @@ namespace StarterAssets
             }
      
             // apply gravity over time if under terminal (multiply by delta time twice to linearly speed up over time)
-            if (_verticalVelocity < _terminalVelocity)
+            if (_verticalVelocity < _terminalVelocity && !_startedFall)
             {
                 _verticalVelocity += Gravity * Time.deltaTime;
-                
             }
+        }
+
+        public void Respawn()
+        {
+            if(Grounded)
+            {
+                _respawnTimeoutDelta = RespawnTimeOut;
+                _respawnPoint = gameObject.transform.position;
+            }
+            if(_verticalVelocity < -40f)
+            {
+                if(_respawnTimeoutDelta >= 0.0f)
+                {
+                    RespawnScreen.SetActive(true);
+                    _respawnTimeoutDelta -= Time.deltaTime;
+                }
+                if(_respawnTimeoutDelta < 0)
+                {
+                    transform.position = _respawnPoint;
+                    _verticalVelocity = -2f;
+                    RespawnScreen.SetActive(false);
+                }
+            }
+            
         }
 
         public void Knockback(Vector3 direction, float force)
         {
-    	  direction.Normalize();
-    	  if (direction.y < 0) direction.y = -direction.y; // reflect down force on the ground
-    	  _impact += direction.normalized * force / mass;
+            direction.Normalize();
+    	    if (direction.y < 0)
+            {
+                direction.y = -direction.y; // reflect down force on the ground
+            }
+            _impact += direction.normalized * force / mass;
     	}
 
 

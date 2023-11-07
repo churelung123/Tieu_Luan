@@ -1,6 +1,7 @@
 using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
+using StarterAssets;
 
 public class Obtacle : MonoBehaviour
 {
@@ -23,7 +24,8 @@ public class Obtacle : MonoBehaviour
         {
             Vector3 hitDirection = other.transform.position - transform.position;
             hitDirection = hitDirection.normalized;
-            FindObjectOfType<StaminaManager>().Obtacle(regentStamina, hitDirection, obtacleForce);
+            other.gameObject.GetComponent<ThirdPersonController>().Obtacle(regentStamina, hitDirection, obtacleForce);
+            // FindObjectOfType<ThirdPersonController>().Obtacle(regentStamina, hitDirection, obtacleForce);
         }
     }
 }
